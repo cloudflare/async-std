@@ -83,3 +83,6 @@ required-features = ["unstable"]
 [[example]]
 name = "tcp-ipv4-and-6-echo"
 required-features = ["unstable"]
+
+[target.'cfg(target_os="linux")'.dependencies]
+udp_sas_mio = "0.1.2"

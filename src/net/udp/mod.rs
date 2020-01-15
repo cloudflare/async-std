@@ -1,5 +1,10 @@
+#[cfg(target_os="linux")]
+use udp_sas_mio::UdpSas;
+
 use std::io;
 use std::net::SocketAddr;
+#[cfg(target_os="linux")]
+use std::net::IpAddr;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::future;
@@ -92,6 +97,32 @@ impl UdpSocket {
         }))
     }
 
+    #[cfg(target_os="linux")]
+    pub async fn bind_sas<A: ToSocketAddrs>(addrs: A) -> io::Result<UdpSocket> {
+        let mut last_err = None;
+        let addrs = addrs
+            .to_socket_addrs()
+            .await?;
+
+        for addr in addrs {
+            match mio::net::UdpSocket::bind_sas(&addr) {
+                Ok(mio_socket) => {
+                    return Ok(UdpSocket {
+                        watcher: Watcher::new(mio_socket),
+                    });
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any addresses",
+            )
+        }))
+    }
+
     /// Returns the local address that this listener is bound to.
     ///
     /// This can be useful, for example, when binding to port 0 to figure out which port was
@@ -161,6 +192,26 @@ impl UdpSocket {
         .context(|| format!("could not send packet to {}", addr))
     }
 
+    #[cfg(target_os="linux")]
+    pub async fn send_sas<A: ToSocketAddrs>(&self, buf: &[u8], addrs: A, local: &IpAddr) -> io::Result<usize> {
+        let addr = match addrs.to_socket_addrs().await?.next() {
+            Some(addr) => addr,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no addresses to send data to",
+                ));
+            }
+        };
+
+        future::poll_fn(|cx| {
+            self.watcher
+                .poll_write_with(cx, |inner| inner.send_sas(buf, &addr, local))
+        })
+        .await
+        .context(|| format!("could not send packet to {}", addr))
+    }
+
     /// Receives data from the socket.
     ///
     /// On success, returns the number of bytes read and the origin.
@@ -184,6 +235,26 @@ impl UdpSocket {
         future::poll_fn(|cx| {
             self.watcher
                 .poll_read_with(cx, |inner| inner.recv_from(buf))
+        })
+        .await
+        .context(|| {
+            use std::fmt::Write;
+
+            let mut error = String::from("could not receive data on ");
+            if let Ok(addr) = self.local_addr() {
+                let _ = write!(&mut error, "{}", addr);
+            } else {
+                error.push_str("socket");
+            }
+            error
+        })
+    }
+
+    #[cfg(target_os="linux")]
+    pub async fn recv_sas(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr, IpAddr)> {
+        future::poll_fn(|cx| {
+            self.watcher
+                .poll_read_with(cx, |inner| inner.recv_sas(buf))
         })
         .await
         .context(|| {
